@@ -342,4 +342,4 @@ Used to watermark completed analysis cycles so the agent avoids re-analyzing the
 Not all errors indicate real failures:
 
 - **`StructuredTool does not support sync invocation`** — not a tool bug; agent was called with `agent.stream` instead of `agent.astream`
-- **`GeneratorExit` / `KeyboardInterrupt`** — user cancelled, not an error.
+- **`CancelledError` / `GeneratorExit` / `KeyboardInterrupt`** — user cancelled, not an error. Expect `status: cancelled`; if a trace says `error`, re-read it before ranking.
