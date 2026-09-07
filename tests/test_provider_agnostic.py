@@ -119,6 +119,57 @@ def test_unreadable_config_falls_back_to_anthropic(monkeypatch):
     assert _required_model_key() == "ANTHROPIC_API_KEY"
 
 
+# --- trajectory specs admit more than one valid route ---------------------------
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "expected, actual, matches",
+    [
+        ("read_file", {"name": "read_file", "args": "{}"}, True),
+        ("read_file", {"name": "grep", "args": "{}"}, False),
+        ({"name": "read_file", "args_contains": "index.md"},
+         {"name": "read_file", "args": "{'file_path': '/wiki/index.md'}"}, True),
+        ({"name": "read_file", "args_contains": "index.md"},
+         {"name": "read_file", "args": "{'file_path': '/wiki/log.md'}"}, False),
+        # a list is ONE step satisfied by any alternative — grep and reading the index
+        # are both valid ways to answer "is X in the wiki?"
+        ([{"name": "grep"}, {"name": "read_file", "args_contains": "index.md"}],
+         {"name": "grep", "args": "{'pattern': 'iphone'}"}, True),
+        ([{"name": "grep"}, {"name": "read_file", "args_contains": "index.md"}],
+         {"name": "read_file", "args": "{'file_path': '/wiki/index.md'}"}, True),
+        ([{"name": "grep"}, {"name": "read_file", "args_contains": "index.md"}],
+         {"name": "write_file", "args": "{}"}, False),
+    ],
+)
+def test_call_matches_spec_shapes(expected, actual, matches):
+    from eval.eval_utils import call_matches
+
+    assert call_matches(expected, actual) is matches
+
+
+@pytest.mark.unit
+def test_query_references_do_not_assert_reading_the_skill():
+    """A trajectory assertion pins what a correct answer requires, not house rules.
+
+    Requiring `/skills/llm-wiki/SKILL.md` as step 1 meant a model that answered perfectly
+    but skipped it scored 0 — and because matching is a forward-only subsequence, a missed
+    first step also made every later match unreachable (Qwen read index.md *and*
+    transformer-architecture.md and still scored 0/3).
+    """
+    import json
+
+    d = json.load(open("eval/golden_datasets/query.json"))
+    cases = d if isinstance(d, list) else d.get("examples", d.get("cases", []))
+    assert cases, "query.json has no cases"
+    for c in cases:
+        for steps in (c["metadata"].get("expected_trajectory") or {}).values():
+            flat = [x for s in steps for x in (s if isinstance(s, list) else [s])]
+            assert not any(
+                isinstance(x, dict) and "SKILL.md" in str(x.get("args_contains", ""))
+                for x in flat
+            ), f"SKILL.md is back in a trajectory assertion: {c['inputs']['message'][:40]}"
+
+
 # --- the eval judges go through the judge role, not the raw SDK ------------------
 
 class _FakeStructured:
@@ -178,13 +229,19 @@ def test_llm_judge_truncates_oversized_input(monkeypatch):
 
 @pytest.mark.unit
 def test_llm_judge_reports_errors_instead_of_raising(monkeypatch):
-    """A judge failure must score 0 and explain, never abort the eval run."""
+    """A judge failure must report *unjudged*, never abort — and never score 0.0.
+
+    `score=None` is the whole point: 0.0 is indistinguishable from "the agent answered
+    badly", so a judge model that cannot parse its own schema would be reported as an
+    agent regression. That matters most when the judge is pointed at a new provider.
+    """
     import eval.eval_utils as eu
 
     _patch_judge(monkeypatch, _FakeModel({}, raises=RuntimeError("provider exploded")))
     out = eu.llm_judge("sys", "answer", key="k")
 
-    assert out["key"] == "k" and out["score"] == 0.0
+    assert out["key"] == "k"
+    assert out["score"] is None, "a broken judge must not look like a failing agent"
     assert "judge error" in out["comment"] and "provider exploded" in out["comment"]
 
 
@@ -212,7 +269,8 @@ def test_llm_judge_multi_reports_errors_for_every_key(monkeypatch):
     out = eu.llm_judge_multi("rubric", "answer", keys=["a", "b"])
 
     assert [r["key"] for r in out] == ["a", "b"]
-    assert all(r["score"] == 0.0 and "judge error" in r["comment"] for r in out)
+    assert all(r["score"] is None for r in out), "unjudged, not failed — see llm_judge"
+    assert all("judge error" in r["comment"] for r in out)
 
 
 @pytest.mark.unit

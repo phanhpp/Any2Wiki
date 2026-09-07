@@ -10,7 +10,7 @@ LangSmith signatures (pick one per function):
     (inputs, outputs, reference_outputs) -> dict
     (run: Run, example: Example) -> dict   ← when example.metadata is needed
 
-LLM judges call Sonnet 4.6 via ``eval.eval_utils.llm_judge()`` and expect JSON ``{"score", "reason"}``.
+LLM judges call LLM API via ``eval.eval_utils.llm_judge()`` and expect JSON ``{"score", "reason"}``.
 
 Evaluator catalog
 -----------------
