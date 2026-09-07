@@ -1,6 +1,6 @@
-# Paper2Wiki: A Self-Improving Research Assistant
+# Any2Wiki: A Self-Improving Research Assistant
 
-A research assistant that transforms research papers into durable artifacts — wiki pages, slide decks, and code. Powered by the [Deep Agents SDK](https://github.com/langchain-ai/deepagents), it can refine its own skills and logic on-demand by analyzing its execution traces.
+A self-improving research assistant that turns any source — papers, repos, web pages — into durable artifacts: wiki pages, slide decks, and code. Built on the [Deep Agents SDK](https://github.com/langchain-ai/deepagents) as a worked example of **loop engineering**: four stacked feedback loops with human approval at every level, a **three-track eval harness** that turns production failures into regression tests, and trace analysis that lets the agent patch its own skills.
 
 ---
 
@@ -16,7 +16,7 @@ A research assistant that transforms research papers into durable artifacts — 
 
 ## Architecture
 
-Paper2Wiki uses a supervisor-subagent architecture powered by the [Deep Agents SDK](https://github.com/langchain-ai/deepagents).
+Any2Wiki uses a supervisor-subagent architecture powered by the [Deep Agents SDK](https://github.com/langchain-ai/deepagents).
 
 ```text
 Supervisor Agent (Local)
@@ -35,7 +35,7 @@ Supervisor Agent (Local)
 
 ## Context Management (Automatic Compaction)
 
-Long ingests and trace analyses can generate huge tool outputs and long histories. Paper2Wiki
+Long ingests and trace analyses can generate huge tool outputs and long histories. Any2Wiki
 relies on the **Deep Agents SDK's built-in context management** — we add **no** summarization
 middleware, so the framework defaults do the work automatically. The agent doesn't "know" it
 happened; its working memory just stays clean.
@@ -73,14 +73,14 @@ the stateless defaults above are sufficient for current workloads.
 
 ```bash
 # 1. Clone
-git clone https://github.com/phanhpp/paper2wiki
-cd paper2wiki
+git clone https://github.com/phanhpp/any2wiki
+cd any2wiki
 
 # 2. Create venv and install deps from pyproject.toml + uv.lock
 uv sync
 
 # 3. (Optional) Jupyter kernel for notebooks
-uv run python -m ipykernel install --user --name=paper2wiki
+uv run python -m ipykernel install --user --name=any2wiki
 
 # 4. Copy and fill env file
 cp .env.example .env
@@ -95,26 +95,52 @@ LANGSMITH_TRACING=true        # Required for self-improvement
 LANGSMITH_PROJECT=paper2wiki
 DAYTONA_API_KEY=...           # Required for Marp slides
 WIKI_PATH=./wiki              # Optional: custom wiki location
-PAPER2WIKI_MODEL=             # Optional: base LLM for all roles, e.g. openai:gpt-4o (default: claude-sonnet-4-6)
+ANY2WIKI_MODEL=             # Optional: base LLM for all roles, e.g. openai:gpt-4o (default: claude-sonnet-4-6)
 ```
 
 ### Choosing your LLM
 
-Paper2Wiki is **provider-agnostic** — all models are resolved from `config.yaml` (no code change).
-Pick **one** base model and set that provider's API key; it drives the supervisor, subagents, and
-all auxiliary tasks (titling, trace summaries, eval judge, web summarizer). Set it via
-`PAPER2WIKI_MODEL` (env) or `model.default` in `config.yaml`, using any LangChain value incl.
-`provider:model` (`openai:gpt-4o`, `google_genai:gemini-2.0-flash`, `anthropic:claude-sonnet-4-6`).
+> **Full guide: [`MODELS.md`](MODELS.md)** — copy-paste recipes for Anthropic, OpenAI,
+> Gemini, OpenRouter, Ollama (local and cloud) and the LiteLLM gateway, plus troubleshooting.
 
-Override a single task under `auxiliary.<task>` (tasks: `supervisor`, `subagent`, `title`,
-`summarize`, `judge`, `web_summarize`) — each block takes `provider`/`model`/`base_url`/`api_key`/
-`timeout`/`extra_body`, so a task can use a different provider or an OpenAI-compatible gateway
-(e.g. OpenRouter) with its own key. Quick env override for one task:
-`PAPER2WIKI_MODEL_SUBAGENT=openai:gpt-4o-mini`. See `config.example.yaml`.
+**Pick one model, and everything uses it.** Set `model.default` in `config.yaml` and that
+provider's API key — it drives the supervisor, the subagents, and every background task.
+Any LangChain model string works, including the `provider:model` form.
+
+```yaml
+# config.yaml
+model:
+  default: openai:gpt-4o
+```
+
+That's the whole setup.
+
+**To make one task differ**, give it an `auxiliary.<task>` block — it can carry its own
+provider, endpoint and key, so a single task can run somewhere else entirely:
+
+```yaml
+auxiliary:
+  summarize:
+    model: openai:gpt-4o-mini
+    base_url: https://openrouter.ai/api/v1   # any OpenAI-compatible gateway
+    api_key: sk-or-...                       # its own key
+```
+
+Tasks: `supervisor`, `subagent`, `title`, `summarize`, `judge`, `web_summarize`.
+
+**When several are set, the first that exists wins:**
+
+```
+ANY2WIKI_MODEL_<TASK> → auxiliary.<task>.model → ANY2WIKI_MODEL → model.default → claude-sonnet-4-6
+```
+
+**Task beats global, env beats config.** The catch: `-m/--model` writes `ANY2WIKI_MODEL`,
+which is *weaker* than a task pinned in `config.yaml` — so `-m` may move fewer tasks than
+you expect. Run `any2wiki config show -m <model>` to see which ones it actually moved.
 
 ## Usage
 
-You can interact with Paper2Wiki using natural language. Here are common patterns:
+You can interact with Any2Wiki using natural language. Here are common patterns:
 
 ### 1. Ingesting Papers
 - "Ingest this paper: https://arxiv.org/abs/2312.00752"
@@ -139,131 +165,35 @@ You can interact with Paper2Wiki using natural language. Here are common pattern
 
 ## Using the CLI
 
-Paper2Wiki ships a terminal CLI (`paper2wiki`) for daily use: an interactive REPL, one-shot
-chat, session browsing, and config inspection. Run commands **from the repo root** — `.env`
-is auto-loaded.
+**Full reference: [`CLI.md`](CLI.md)** — every flag, the Slack setup, connector fetches and
+session pruning.
 
-### Running it
-
-The most reliable invocation (works regardless of your PATH or editable-install state):
+Any2Wiki ships a terminal CLI (`any2wiki`). Run it from the repo root; `.env` is loaded
+automatically.
 
 ```bash
 uv run python -m src.cli.app repl                                  # interactive chat
 uv run python -m src.cli.app chat "ingest https://arxiv.org/abs/…" # one-shot, then exit
-uv run python -m src.cli.app sessions ls                           # browse past sessions
-uv run python -m src.cli.app config show                           # show effective config
 ```
-
-Optional alias so it reads like a real command:
-
-```bash
-echo "alias paper2wiki='uv run python -m src.cli.app'" >> ~/.zshrc && source ~/.zshrc
-paper2wiki repl
-```
-
-(A `paper2wiki` console script is also installed in the venv; it needs `.venv/bin` on your
-PATH — either `source .venv/bin/activate` or use `uv run paper2wiki …`.)
-
-### Commands
 
 | Command | What it does | Needs LLM? |
 |---|---|---|
-| `repl` | Interactive chat session (streaming, approvals, meta-commands) | yes |
+| `repl` | Interactive chat — streaming, approvals, meta-commands | yes |
 | `chat "<msg>"` | Run a single message and exit | yes |
-| `serve` | Listen on a Slack channel and run the agent on each message | yes |
-| `sessions ls [-n N]` | List recent sessions, newest first | no |
-| `sessions stats` | Catalog summary + how many you'd prune at each age threshold | no |
-| `sessions search "<query>"` | Full-text search message history | no |
-| `sessions resume <id\|title>` | Reopen a past session in the REPL | yes |
-| `sessions rename <id\|title> "<new>"` | Rename a session | no |
-| `sessions prune [--older-than-days N] [-y]` | Delete old ended sessions (+ their checkpoints) | no |
-| `sessions prune-orphans [--apply] [--vacuum] [--older-than D] [--full]` | Evict checkpoints with no session row (dry run by default) | no |
-| `config show` | Print the effective config (ingest mode, wiki path, providers) | no |
+| `serve` | Answer messages in a Slack channel (Loop 3) | yes |
+| `fetch [connector]` | Pull raw source data to `connectors/` — phase 1 of ingest | **no** |
+| `sessions …` | Browse, search, resume, rename or prune past sessions | only `resume` |
+| `config show` | Print the resolved models, providers, endpoints and paths | no |
 
-`sessions`/`config` don't load the agent stack, so they're fast; `repl`/`chat` build the
-supervisor (and, unless `--eval-mode`, a Daytona sandbox).
+Common flags on the agent commands: `-m/--model`, `--ingest-mode`, `--wiki-path`,
+`--yes/-y`, `--eval-mode`, `--thread-id/-t`, `--no-save`, `--debug`. All of them, and which
+command takes which, are in [`CLI.md`](CLI.md#common-flags).
 
-### Common flags (on `chat` / `repl` / `sessions resume`)
-
-| Flag | Purpose |
-|---|---|
-| `--thread-id` / `-t` | Resume / pin a specific thread |
-| `--ingest-mode {fast\|quality}` | Override ingest mode |
-| `--wiki-path` | Override the wiki directory |
-| `--yes` / `-y` | Auto-approve all approval prompts |
-| `--eval-mode` | Skip the Daytona sandbox (no Marp subagent) |
-| `--no-save` | Don't persist to `sessions.db` (throwaway turns; in-run approvals still work) |
-| `--debug` | Show diagnostic output |
-
-### Inside the REPL
-
-- Chat in natural language (see [Usage](#usage) above).
-- **Approvals (HITL):** tool calls pause for review. Choose **a** approve · **e** edit args ·
-  **r** reject *(with an optional reason sent back to the agent so it tries differently)* ·
-  **s** respond *(answer on the tool's behalf, for ask-user tools)* · **yolo** approve all for
-  the session. Only the options a given tool allows are shown.
-- **Long tool output** is shown as a short preview; **`/open`** (or **Ctrl-O** at the prompt)
-  pages the full output — press **`q`** to close. *(Ctrl-O works at the `you ❯` prompt, not
-  mid-stream.)*
-- **Meta-commands:** `/title <name>` · `/new` · `/help` · `/open` (alias `/last`) · `/exit`
-  (bare `quit`/`exit`/`bye`/`:q` and Ctrl-D also quit).
-
-### Pruning old sessions
-
-History is kept indefinitely by default (it powers `sessions search`). When you want to clean
-up, run `sessions stats` first to see the totals, time range, and how many sessions you'd delete
-at each age threshold — then prune. **Pruning is manual and explicit** — one command tidies both
-stores in lockstep:
+Handy alias:
 
 ```bash
-paper2wiki sessions stats                      # see totals + what each threshold would delete
-paper2wiki sessions prune                      # delete ended sessions older than 90 days
-paper2wiki sessions prune --older-than-days 30 # custom age threshold
-paper2wiki sessions prune -y                   # skip the confirmation prompt
+echo "alias any2wiki='uv run python -m src.cli.app'" >> ~/.zshrc && source ~/.zshrc
 ```
-
-- **Preview before delete:** `prune` lists the date + title of every session it will remove and
-  asks to confirm, so you can judge each by its title (answer `n` to inspect without deleting).
-- **What's removed:** ended sessions past the threshold — their chat history (`sessions.db`)
-  **and** their resumable graph state (`checkpoints.db`), keyed by the same `thread_id`.
-- **What's kept:** active sessions are never pruned, regardless of age.
-- **Irreversible:** a pruned session can no longer be searched *or* resumed.
-
-`prune` is the only `sessions` subcommand that loads the checkpointer; `ls` / `search` /
-`resume` stay fast.
-
-#### Orphan checkpoints
-
-`prune` only evicts checkpoints whose **session row still exists** — it's driven by deleted
-sessions. Runs that never wrote a session row (`--no-save` turns, eval/test threads, history
-predating `sessions.db`) leave **orphan** checkpoints that `prune` can't reach, and they're
-usually the bulk of `checkpoints.db`. Sweep them separately:
-
-```bash
-paper2wiki sessions prune-orphans                      # dry run — lists orphans + each one's last-activity age
-paper2wiki sessions prune-orphans --full               # list every orphan (not just the first 20)
-paper2wiki sessions prune-orphans --older-than 1       # skip threads active in the last day
-paper2wiki sessions prune-orphans --apply              # actually evict them (via adelete_thread)
-paper2wiki sessions prune-orphans --apply --vacuum     # also shrink the file on disk
-```
-
-- **Dry run by default** — review the list (each orphan shows its last-activity age), then re-run
-  with `--apply`. Use `--full` to print the whole list instead of the first 20.
-- **`--older-than DAYS`** skips recently-active threads (last activity read from each thread's
-  most recent checkpoint) — use it to avoid evicting a session mid-first-turn whose session row
-  hasn't been written yet. Note: **larger values are *more* restrictive** (fewer matches); if it
-  matches nothing it tells you how many orphans exist and their age range.
-- **Safety guard:** if `sessions.db` is empty it refuses (everything would look orphaned).
-- **`--vacuum`** reclaims disk: plain deletes only free pages internally, so the file doesn't
-  shrink until you VACUUM (a one-shot rebuild). Without it, orphans are gone but the file stays
-  the same size.
-
-### macOS note
-
-Occasionally (usually right after `uv sync`) the bare `paper2wiki` command fails with
-`ModuleNotFoundError: No module named 'src'` — a uv editable-`.pth` hidden-flag quirk. Fix:
-`chflags nohidden .venv/lib/python*/site-packages/__editable__.llm_wiki-*.pth`. The
-`uv run python -m src.cli.app …` form sidesteps it entirely.
 
 ---
 
@@ -305,11 +235,49 @@ Three operations:
 
 Trigger with: *"Analyze my recent traces"* or *"What went wrong in the last few runs?"*
 
-1. **Fetch** — `run_trace_report_async` retrieves recent traces from LangSmith (pass `error=True` to scope to failures only).
-2. **Summarize** — `summarize_traces_async` batches traces into pages and condenses them in parallel into structured summaries.
-3. **Cluster & detect** — the agent groups findings by pattern (skill deviations, tool errors, HITL rejections), validates each against git history to skip already-fixed issues, then runs `detect_anomalies_async` to produce ground-truth anomaly signals (`hard_error`, `latency_spike`, `token_blowout`, `step_count_spike`). Presents a ranked report and **waits for your confirmation** before proceeding.
-4. **Push to datasets** — `create_datasets_from_anomaly_report` pushes failing spans to scoped LangSmith datasets (used by the weekly CI regression suite). For tool hard errors, it also generates candidate `eval/pr_gate_cases.json` entries, presents them with inferred assertions (`expect_error` or `expect_keys`), and **waits for your approval** before writing. Approved cases are added to `eval/pr_gate_cases.json` in the same commit — so the fix PR also hardens the PR gate against that failure recurring.
-5. **Commit & PR** — commits all changes (skill patches, `AGENTS.md` updates, `eval/pr_gate_cases.json` additions), opens a PR, and appends a watermark to `trace_analysis_log.md`.
+Five steps. Two of them stop and wait for you.
+
+1. **Fetch** — `run_trace_report_async` pulls recent traces (`error=True` scopes to failures).
+2. **Summarize** — `summarize_traces_async` condenses them in parallel.
+3. **Cluster & detect** — group findings by pattern, then run `detect_anomalies_async`.
+   > **Waits for you** to acknowledge the ranked report.
+4. **Push to datasets** — failing spans go to LangSmith; tool hard errors also become draft
+   PR-gate cases with inferred assertions.
+   > **Waits for you** to approve before writing `eval/pr_gate_cases.json`.
+5. **Commit & PR** — skill / `AGENTS.md` patches plus the new gate cases, one PR, and a
+   watermark in `trace_analysis_log.md`.
+
+Two details worth knowing:
+
+- **Step 3 checks git history first** (`git log -n 20 -- <file>`) and strikes any finding a
+  recent commit already fixed — traces are always older than the code.
+- **Step 4 proposes the assertion; you decide it.** The tool hands back only the failing
+  inputs — no assertion at all. The skill reads the error message and suggests one:
+
+  | Error signal | Reading | Suggests |
+  |---|---|---|
+  | `No paper found for ID INVALID999` | the input was junk — it *should* fail | `expect_error: true` |
+  | `KeyError: 'pdf_path'` on `1706.03762` | a real paper, so this is a bug; once fixed it should return data | `expect_keys: ["title", "pdf_path", "metadata"]` |
+
+  You approve or correct it. Full field schema in
+  [`eval/README.md`](eval/README.md#pr-gate-case-schema).
+
+The fix and its gate case land in the **same PR** — and that case then runs on every PR
+thereafter, which is what makes the fix durable.
+
+### Two kinds of finding
+
+Step 3 produces two streams, and conflating them is the usual confusion:
+
+- **Qualitative** — from clustering the summaries: `skill_deviation`, `hitl_rejected`, tool
+  misuse. The model's *reading* of what went wrong → patches a `SKILL.md` or `AGENTS.md`.
+- **Quantitative** — from `detect_anomalies_async`, measured against `baselines.json`:
+  `hard_error`, `latency_spike`, `token_blowout`, `step_count_spike` → a LangSmith dataset
+  entry, and for **tool hard errors only**, a PR-gate case.
+
+**A qualitative finding changes a prompt; a quantitative one can become a test.** Only a
+hard error on a tool run is reproducible enough to block a merge — spikes aren't, and an
+llm-run error has no tool to re-call. Detail in [`eval/README.md`](eval/README.md).
 
 ---
 
@@ -329,14 +297,14 @@ The agent uses a dedicated subagent in a Daytona sandbox to create presentations
 
 ## Loop Engineering
 
-Paper2Wiki is built as a worked example of [loop engineering](https://www.langchain.com/blog/the-art-of-loop-engineering) — stacking feedback and execution loops *around* the model instead of relying on the model alone. Each loop catches what the tighter loop inside it cannot.
+Any2Wiki is built as a worked example of [loop engineering](https://www.langchain.com/blog/the-art-of-loop-engineering) — stacking feedback and execution loops *around* the model instead of relying on the model alone. Each loop catches what the tighter loop inside it cannot.
 
-| Loop | Goal | How Paper2Wiki implements it |
+| Loop | Goal | How Any2Wiki implements it |
 |---|---|---|
 | **1 · Agent** | automate the work | Supervisor + Daytona marp subagent (Deep Agents SDK); skill-driven tools for ingest, query, slides, and trace analysis. HITL on every `write_file` / `edit_file` / `execute`. |
 | **2 · Verification** | correctness | `WikiRubricMiddleware` (`src/middleware/`) classifies each run as ingest / query / marp from a **filesystem diff** — catching writes made through the shell, which tool-call scanning misses — then runs 16 deterministic checks (frontmatter, wikilink resolution, `index.md` + `log.md`, graph nodes/edges, source hashes). On failure it sends the agent back with the specific gaps, capped at `max_iterations`, then surfaces the verdict. **No LLM, so the loop is free.** |
-| **3 · Event-driven** | run without being asked | `paper2wiki serve` — a Slack front-end over Socket Mode (outbound websocket, so no public URL or webhook). A message starts a turn, a threaded reply resumes it, approvals are Block Kit buttons. Same agent, same wiki as the terminal — it reuses the `Renderer` protocol, so the agent and persistence layers are untouched. |
-| **4 · Hill-climbing** | improve the harness | Weekly CI refreshes anomaly baselines from live traces; the `trace-analysis` skill converts detected failures into versioned LangSmith datasets and candidate PR-gate cases; `hard_error` examples are replayed weekly to prove fixes hold. A production bug lands its regression test in the same PR as its fix. |
+| **3 · Event-driven** | run without being asked | `any2wiki serve` — a Slack front-end over Socket Mode (outbound websocket, so no public URL or webhook). A message starts a turn, a threaded reply resumes it, approvals are Block Kit buttons. Same agent, same wiki as the terminal — it reuses the `Renderer` protocol, so the agent and persistence layers are untouched. |
+| **4 · Hill-climbing** | improve the harness | Weekly CI refreshes anomaly baselines from live traces; the `trace-analysis` skill turns detected failures into versioned LangSmith datasets and candidate PR-gate cases, HITL-approved. A production bug lands its regression test in the same PR as its fix — and that case then runs on every PR thereafter. |
 
 **Human oversight is a primitive at every level**, not an escape hatch: tool approvals in Loops 1 and 3, the retry cap surfacing to the user in Loop 2, and mandatory approval before any harness change is committed in Loop 4.
 
@@ -353,15 +321,17 @@ llm_wiki/
 ├── src/agents/       # Supervisor & Daytona subagent logic (Loop 1)
 ├── src/middleware/   # WikiRubricMiddleware — in-run verification (Loop 2)
 ├── src/slack/        # Socket Mode front-end (Loop 3)
+├── src/connectors/   # Phase 1 of ingest — deterministic fetch, no LLM
 ├── src/tools/        # Ingest (Docling, arXiv), Trace, & Wiki tools
-├── src/cli/          # Terminal REPL / one-shot chat / session browsing
+├── src/cli/          # Terminal REPL / chat / serve / fetch / sessions
 ├── skills/           # Skill definitions (Markdown + logic)
 ├── wiki/             # The knowledge base
 └── marp-slides/      # Presentation outputs
 ```
 
-`src/middleware/` and `src/slack/` each carry their own `README.md` explaining the
-checks and the message flow respectively.
+`src/middleware/`, `src/slack/`, `src/cli/` and `src/connectors/` each carry their own
+`README.md` — the checks, the Slack message flow, the terminal front-end, and the fetch
+contract respectively.
 
 ### Tests & CI
 
@@ -389,14 +359,15 @@ Track 2 — Golden Agent Eval (weekly, or path-conditional on PR)
 Track 3 — Anomaly Replay Loop (weekly + HITL only)
   run_weekly_baselines.py   Fetches traces and refreshes latency/token/step medians
   trace-analysis skill      HITL-approved anomaly detection + dataset creation
-  test_anomaly_regression.py Replays hard_error examples; fixed bugs must stay fixed
+  (promotion, not replay)   An approved hard_error becomes a pr_gate_cases.json entry,
+                            which then runs on every PR — that is what locks the fix in
 ```
 
 **Track 1: deterministic PR gate** — fast regression checks that exercise tools directly with versioned inputs and assertions, before any LLM or agent runtime. The **blocking** cases are deterministic and key-free (hash-convention correctness, SSRF/boundary guards, wiki integrity), so the 100% floor never flakes. Network/external behavior (web search/extract, arXiv) is tracked as non-blocking **capability** — it uses a web-provider key when one is set (mapped in CI), and skips gracefully otherwise.
 
 **Track 2: golden agent evals** — end-to-end agent runs over curated ingest, query, and slide-generation scenarios. Code checks validate trajectories and required artifacts, while LLM judges score groundedness, faithfulness, and task-specific quality.
 
-**Track 3: anomaly replay loop** — weekly CI fetches recent LangSmith traces to update baselines, then replays HITL-approved `hard_error` examples from LangSmith datasets to confirm previously fixed failures do not recur.
+**Track 3: anomaly loop** — weekly CI fetches recent LangSmith traces to refresh the anomaly baselines. The `trace-analysis` skill (HITL) turns detected failures into LangSmith datasets and, for tool hard errors, candidate PR-gate cases. **Promotion is what makes a fix durable**: once a case is in `pr_gate_cases.json` it runs on every PR, so there is no separate weekly replay to maintain.
 
 **Closed feedback loop** — the trace-analysis skill surfaces failures across the full stack (tool hard errors, latency spikes, token blowouts, step-count anomalies, HITL rejections). For hard errors it auto-generates candidate eval/pr_gate_cases.json entries with inferred assertions and waits for HITL approval before committing. The fix and its regression case land in the same PR, permanently hardening the gate against that failure recurring.
 
@@ -407,9 +378,8 @@ Track 3 — Anomaly Replay Loop (weekly + HITL only)
 LLM access — virtual keys + per-team budgets/RBAC, spend alerts, Prometheus metrics, fallbacks,
 a prompt-injection guardrail, and a semantic response cache (Postgres + Redis). It's **not part of
 the published package** (lives outside `src/`); the app only talks to it over HTTP when
-`PAPER2WIKI_LLM_GATEWAY=litellm` is set, and never imports `litellm`. Setup, rationale, and the
-"lie to LangChain" routing trick are in [`gateway/README.md`](gateway/README.md) and
-`docs/litellm/`.
+`ANY2WIKI_LLM_GATEWAY=litellm` is set, and never imports `litellm`. Setup, rationale, and the
+"lie to LangChain" routing trick are in [`gateway/README.md`](gateway/README.md).
 
 ### Wiki Integrity (Linting)
 

@@ -14,21 +14,13 @@ from src.agents.renderer import Renderer, DefaultRenderer
 from src.sessions.sessions_db_setup import get_sessions_conn
 from src.sessions.session_manager import save_session
 from src.sessions.title_manager import maybe_auto_title
+from src.text import as_text as _as_text
+
+#: How long a finishing turn waits for the auto-title call before giving up.
+_TITLE_WAIT_SECONDS = 10.0
 
 
-def _as_text(content) -> str:
-    """Flatten a message's content (str, or a list of text/dict blocks) to plain text."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text") or block.get("content") or str(block))
-            else:
-                parts.append(str(block))
-        return "\n".join(parts)
-    return str(content)
+
 
 # Todo: resolve flow_type by tools involved
 def _save_session(conn, thread_id, messages, started_at, flow_type="ingest", auto_title=True):
@@ -46,7 +38,13 @@ def _save_session(conn, thread_id, messages, started_at, flow_type="ingest", aut
         flow_type=flow_type,
     )
     if auto_title:
-        maybe_auto_title(conn, session_id, messages)
+        thread = maybe_auto_title(conn, session_id, messages)
+        # Wait briefly. The titling thread is a daemon, so a one-shot `chat` would
+        # otherwise exit and kill it mid-call, leaving every such session "untitled" —
+        # only the REPL, which stays alive for the next prompt, ever got a title.
+        # Bounded so a slow or failing provider delays exit by seconds, not forever.
+        if thread is not None:
+            thread.join(timeout=_TITLE_WAIT_SECONDS)
 
 
 async def run_turn_stream_async(
@@ -100,27 +98,21 @@ async def run_turn_stream_async(
     started_at = int(time.time())
 
     while True:
-        pending_interrupts = None
-
         # Signal "agent is thinking" before any output — the renderer shows a transient
         # spinner that the first token/tool-call tears down. Runs each iteration so the
         # post-interrupt resume (below) gets a fresh spinner during its think gap too.
         renderer.on_turn_start()
 
-        # Stream values (for interrupts) + messages (for token output)
+        # Stream messages (token output) + updates (tool calls). Interrupts are NOT read
+        # from here — see the state check after the loop for why.
         async for chunk in agent.astream(
             payload,
             config=merged_config,
             version="v2",
             subgraphs=True,
-            stream_mode=["values", "messages", "updates"],
+            stream_mode=["messages", "updates"],
         ):
-            if chunk["type"] == "values":  # Interrupts ride on values stream parts in v2
-                if chunk.get("interrupts"):
-                    pending_interrupts = chunk["interrupts"]
-                    break  # stop streaming, handle HITL
-
-            elif chunk["type"] == "updates":
+            if chunk["type"] == "updates":
                 for node_name, node_data in chunk["data"].items():
                     if not isinstance(node_data, dict):
                         continue
@@ -159,12 +151,27 @@ async def run_turn_stream_async(
                             if text:
                                 renderer.on_token(text)
 
+        renderer.on_turn_end()  # newline after streaming / before any HITL prompt
+
+        # Ask the graph whether it is interrupted, rather than watching the stream.
+        #
+        # This used to read ``chunk["interrupts"]`` off the ``values`` stream, which
+        # prompted **twice for one tool call**: ``values`` emits the whole state after
+        # each super-step, so when the loop restarts to resume, the first snapshot still
+        # carries the interrupt we just resolved and it looks like a new one.
+        #
+        # Deduplicating on ``Interrupt.id`` would be worse than the bug: the id is
+        # ``xxh3_128_hexdigest(checkpoint_ns)`` (langgraph/types.py:568) — a hash of the
+        # *node position*, not the individual interrupt. Two genuine approvals at the same
+        # node share an id, so skipping repeats would silently auto-approve the second.
+        #
+        # The persisted checkpoint has no such ambiguity: it either holds a pending
+        # interrupt or it does not.
+        state = await agent.aget_state(merged_config)
+        pending_interrupts = getattr(state, "interrupts", None)
         if not pending_interrupts:
-            renderer.on_turn_end()  # newline after streaming
             break
 
-        # Handle interrupts and resume
-        renderer.on_turn_end()  # newline before HITL prompt
         decisions = await renderer.handle_interrupts(pending_interrupts)
         payload = Command(resume={"decisions": decisions})
         # Loop back, stream the resumed execution

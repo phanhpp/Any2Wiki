@@ -50,7 +50,10 @@ from src.tools.observability_eval_tools.fetch_traces import TraceReport
 MINIMUM_SAMPLES = 3
 _SPIKE_MULTIPLIER = 3
 _LLM_RUN_TYPES = {"llm"}
-_EXCLUDE_NAMES = {"model", "tools", "ChatAnthropic"}
+# LangGraph/LangChain internals, not single operations: their latency spans the whole
+# graph. "ChatOpenAI" covers every OpenAI-compatible endpoint too — OpenRouter,
+# Ollama and the LiteLLM gateway all arrive under that class name.
+_EXCLUDE_NAMES = {"model", "tools", "ChatAnthropic", "ChatOpenAI", "ChatGoogleGenerativeAI"}
 BASELINES_PATH = Path(__file__).resolve().parents[3] / "memories" / "baselines.json"
 
 # Extracts the JSON string (including {}) from lines like: [depth=2] {"key": "value"}

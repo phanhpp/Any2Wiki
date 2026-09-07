@@ -1,10 +1,47 @@
-"""Summarize a TraceReport into structured per-trace JSON via the configured LLM."""
+"""Turn a ``TraceReport`` into one structured summary per trace.
+
+Step 2 of the trace-analysis loop: ``fetch_traces`` collects raw LangSmith runs, this
+condenses each into a typed row, and ``anomaly_detection`` measures them against
+baselines. This is the only step that costs an LLM call.
+
+Flow
+----
+::
+
+    summarize_traces_async(report, offset, limit, focus)      ← the @tool
+        └─ _summarize_traces_async
+             ├─ _load_traces(report)          on disk if is_offloaded, else in memory
+             ├─ default mode (offset=0, limit=50)
+             │    └─ asyncio.gather over pages ──┐   batches run concurrently
+             └─ targeted mode (explicit page)  ──┤
+                                                 ▼
+                                    _summarize_batch_async(page)
+                                      ├─ _filter_traces(focus_query)   cheap prefilter
+                                      ├─ _build_messages(...)          + the skill list
+                                      ├─ _get_structured_llm().ainvoke(...)
+                                      └─ response["parsed"] → [TraceSummary, ...]
+
+Two things the schema alone cannot get right, and both were wrong in production:
+
+**A user pressing Ctrl-C is not a failure.** It surfaces as ``CancelledError`` and was
+being labelled ``status="error"``, which ranks it as a finding and can turn a person
+closing a terminal into a PR-gate case. ``status`` now says so explicitly.
+
+**``affected_skill`` must be a skill.** The field had no description, so the model
+answered with the run name in front of it — ``ChatOpenAI`` — which is a LangChain class.
+``_build_messages`` now injects the skill names *read from disk*, because the agent
+rewrites its own skills at runtime and a hard-coded list would go stale.
+
+Offloading: a large report keeps its traces in a file (``traces_path``) rather than in
+the object, so ``_load_traces`` is the one place that has to know which.
+"""
 from __future__ import annotations
 
 import json
 from src.tools.observability_eval_tools.fetch_traces import TraceReport
 from src.agents.llms import set_up_llms
 from src.llm_roles import get_model_spec
+from src.paths import package_root
 from pydantic import BaseModel, Field
 from typing_extensions import Optional, Literal, Any
 from langchain.tools import tool
@@ -25,7 +62,7 @@ def _get_structured_llm():
 
 
 _SYSTEM_PROMPT = (
-    "You are a concise technical analyst for a LLM agent system called Paper2Wiki. "
+    "You are a concise technical analyst for a LLM agent system called Any2Wiki. "
     "You receive formatted LangSmith trace logs and return structured JSON summaries. "
     "Emphasize any issues or anomalies in the traces. "
     "Return only valid JSON — no markdown fences, no preamble, no explanation."
@@ -34,9 +71,18 @@ _SYSTEM_PROMPT = (
 class TraceSummary(BaseModel):
     trace_id: str
     session_summary: str
-    status: Literal["success", "error", "pending", "cancelled"]
+    status: Literal["success", "error", "pending", "cancelled"] = Field(
+        description="Use 'cancelled' — NOT 'error' — when the user interrupted the run: "
+                    "CancelledError, GeneratorExit, KeyboardInterrupt. Those are a person "
+                    "pressing Ctrl-C, not a defect, and must never become a gate case."
+    )
     error_type: str = Field(description="Short error category if status='error', e.g. 'tool_failure', 'context_limit', 'hitl_rejected'; else 'none'")
-    affected_skill: Optional[str] = None
+    affected_skill: Optional[str] = Field(
+        default=None,
+        description="One of the skill names listed in the prompt, or null if the trace "
+                    "maps to none. NEVER a class or run name (ChatOpenAI, ChatAnthropic, "
+                    "model, tools) — those are LangGraph internals, not skills.",
+    )
     skill_compliance: Optional[str] = Field(default=None, description="'compliant', 'deviated', or 'not_applicable'")
     deviation_note: Optional[str] = Field(default=None, description="Concise description of what the agent did wrong or unexpectedly; null if compliant")
     latency_s: Optional[float] = None
@@ -66,16 +112,43 @@ def _filter_traces(traces: dict[str, str], focus_query: str | None) -> dict[str,
     return filtered if filtered else traces
 
 
+def _available_skills() -> list[str]:
+    """Skill names as they exist on disk right now.
+
+    Read rather than hard-coded: the agent rewrites its own skills at runtime, so a
+    literal list here would go stale the moment one is added. Empty on any failure —
+    the prompt then simply omits the constraint rather than asserting a wrong one.
+    """
+    try:
+        skills_dir = package_root().parent / "skills"
+        return sorted(d.name for d in skills_dir.iterdir()
+                      if d.is_dir() and (d / "SKILL.md").exists())
+    except Exception:
+        return []
+
+
 def _build_messages(traces: dict[str, str], focus_query: str | None) -> str:
-    """Build the system prompt for the trace summarization.
-    We use built in structured output to ensure the output is always valid JSON 
-    and will automatically inject the TraceSummary model into prompt"""
+    """Assemble the user message: the traces, plus what the model needs to label them.
+
+    Structured output injects the ``TraceSummary`` schema automatically, so this only
+    supplies what the schema cannot: the trace text itself, an optional focus, and the
+    **actual skill names**, without which ``affected_skill`` gets filled with whatever
+    run name was visible (``ChatOpenAI``) — a class, not a skill.
+    """
     focus_line = f"Focus: {focus_query}" if focus_query else "General analysis."
+    skills = _available_skills()
     parts = [
-        f"Analyzing {len(traces)} traces from Paper2Wiki agent.",
+        f"Analyzing {len(traces)} traces from Any2Wiki agent.",
         focus_line,
         "",
     ]
+    if skills:
+        parts += [
+            "The only valid values for `affected_skill` are: " + ", ".join(skills) + ".",
+            "Use null when a trace maps to none of them. Never answer with a class or "
+            "run name such as ChatOpenAI, ChatAnthropic, model or tools.",
+            "",
+        ]
     for trace_id, trace_text in traces.items():
         parts.append(f"=== TRACE {trace_id} ===")
         parts.append(trace_text)

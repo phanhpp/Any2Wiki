@@ -1,7 +1,7 @@
 """One-shot script to fetch raw LangSmith runs and save them as a JSON fixture.
 
 Run manually when you need to refresh the fixture:
-    uv run --env-file .env python -m tests.save_fixtures
+    uv run --env-file .env python -m tests.scripts.save_fixtures
 
 Requires LANGSMITH_API_KEY to be set. The fixture is intentionally committed
 so tests can run offline without hitting the API.
@@ -24,7 +24,7 @@ async def main() -> None:
     client = AsyncClient()
     runs = [
         run async for run in client.list_runs(
-            project_name="paper2wiki",
+            project_name="any2wiki",
             start_time=datetime.now(timezone.utc) - timedelta(days=7),
             limit=100,
         )

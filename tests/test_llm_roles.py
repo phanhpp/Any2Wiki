@@ -6,11 +6,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """Strip PAPER2WIKI_* and LITELLM_* env so tests are deterministic."""
+    """Strip ANY2WIKI_* and LITELLM_* env so tests are deterministic."""
     import os
 
     for k in list(os.environ):
-        if k.startswith("PAPER2WIKI_") or k.startswith("LITELLM_"):
+        if k.startswith("ANY2WIKI_") or k.startswith("LITELLM_"):
             monkeypatch.delenv(k, raising=False)
     yield
 
@@ -38,7 +38,7 @@ def test_base_model_precedence_env_over_config(monkeypatch):
     _set_config(monkeypatch, {"model": {"default": "config:model"}})
     assert lr.get_base_model() == "config:model"
 
-    monkeypatch.setenv("PAPER2WIKI_MODEL", "openai:gpt-4o")
+    monkeypatch.setenv("ANY2WIKI_MODEL", "openai:gpt-4o")
     assert lr.get_base_model() == "openai:gpt-4o"
 
 
@@ -57,7 +57,7 @@ def test_role_inherits_base_unless_overridden(monkeypatch):
     assert lr.get_model("subagent") == "openai:gpt-4o-mini"
     assert lr.get_model("title") == "openai:gpt-4o"
 
-    monkeypatch.setenv("PAPER2WIKI_MODEL_TITLE", "anthropic:claude-haiku-4-5")
+    monkeypatch.setenv("ANY2WIKI_MODEL_TITLE", "anthropic:claude-haiku-4-5")
     assert lr.get_model("title") == "anthropic:claude-haiku-4-5"
 
 
@@ -111,7 +111,7 @@ def test_get_model_rejects_unknown_role(monkeypatch):
 
 @pytest.mark.unit
 def test_gateway_off_leaves_spec_unrouted(monkeypatch):
-    """No PAPER2WIKI_LLM_GATEWAY → spec keeps its configured provider/base_url (direct path)."""
+    """No ANY2WIKI_LLM_GATEWAY → spec keeps its configured provider/base_url (direct path)."""
     import src.llm_roles as lr
 
     _set_config(monkeypatch, {"model": {"default": "claude-sonnet-4-6", "provider": "anthropic"}})
@@ -126,7 +126,7 @@ def test_gateway_on_routes_every_role_to_proxy(monkeypatch):
     import src.llm_roles as lr
 
     _set_config(monkeypatch, {"model": {"default": "claude-sonnet-4-6", "provider": "anthropic"}})
-    monkeypatch.setenv("PAPER2WIKI_LLM_GATEWAY", "litellm")
+    monkeypatch.setenv("ANY2WIKI_LLM_GATEWAY", "litellm")
     monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:4000")
     monkeypatch.setenv("LITELLM_API_KEY", "sk-virtual-tenant")
 
@@ -143,7 +143,7 @@ def test_gateway_defaults_base_url(monkeypatch):
     import src.llm_roles as lr
 
     _set_config(monkeypatch, {"model": {"default": "m"}})
-    monkeypatch.setenv("PAPER2WIKI_LLM_GATEWAY", "litellm")
+    monkeypatch.setenv("ANY2WIKI_LLM_GATEWAY", "litellm")
     assert lr.get_model_spec("title").base_url == lr._GATEWAY_DEFAULT_BASE_URL
 
 
@@ -153,7 +153,7 @@ def test_gateway_caches_only_idempotent_roles(monkeypatch):
     import src.llm_roles as lr
 
     _set_config(monkeypatch, {"model": {"default": "m"}})
-    monkeypatch.setenv("PAPER2WIKI_LLM_GATEWAY", "litellm")
+    monkeypatch.setenv("ANY2WIKI_LLM_GATEWAY", "litellm")
     monkeypatch.setenv("LITELLM_CACHE_NAMESPACE", "tenant-1")
 
     for role in ("web_summarize", "summarize", "title", "judge"):
@@ -170,7 +170,7 @@ def test_gateway_cache_without_namespace(monkeypatch):
     import src.llm_roles as lr
 
     _set_config(monkeypatch, {"model": {"default": "m"}})
-    monkeypatch.setenv("PAPER2WIKI_LLM_GATEWAY", "litellm")
+    monkeypatch.setenv("ANY2WIKI_LLM_GATEWAY", "litellm")
 
     assert lr.get_model_spec("summarize").extra_body["cache"] == {"use-cache": True}
 
@@ -248,7 +248,7 @@ def test_resolves_from_real_config_file(tmp_path, monkeypatch):
         "web:\n"
         "  backend: firecrawl\n"
     )
-    monkeypatch.setenv("PAPER2WIKI_CONFIG", str(cfg))
+    monkeypatch.setenv("ANY2WIKI_CONFIG", str(cfg))
 
     assert lr.get_base_model() == "claude-sonnet-4-6"
     spec = lr.get_model_spec("title")
@@ -271,3 +271,74 @@ def test_set_up_llms_string_paths_unchanged(monkeypatch):
     assert captured["model"] == "openai:gpt-4o"
     assert captured["max_tokens"] == llms._GENERIC_DEFAULTS["max_tokens"]
     assert "effort" not in captured
+
+
+@pytest.mark.unit
+def test_model_precedence_full_chain(monkeypatch):
+    """Five levels can name a model; the first that exists wins, in this order:
+
+        Task-Specific Env Var → Task Config → Global Env Var → Base Config → Fallback
+
+    Documented in the module docstring and README's "Choosing your LLM". Asserted here
+    as one ordered sequence so the order itself is locked, not just each level.
+    """
+    import src.llm_roles as lr
+
+    cfg = {
+        "model": {"default": "level4-base-config"},
+        "auxiliary": {"summarize": {"model": "level2-task-config"}},
+    }
+    _set_config(monkeypatch, cfg)
+
+    # 1. task env var beats everything
+    monkeypatch.setenv("ANY2WIKI_MODEL_SUMMARIZE", "level1-task-env-var")
+    monkeypatch.setenv("ANY2WIKI_MODEL", "level3-global-env-var")
+    assert lr.get_model_spec("summarize").model == "level1-task-env-var"
+
+    # 2. drop it → the task's config block
+    monkeypatch.delenv("ANY2WIKI_MODEL_SUMMARIZE")
+    assert lr.get_model_spec("summarize").model == "level2-task-config"
+
+    # 3. drop that → the global env var
+    _set_config(monkeypatch, {"model": {"default": "level4-base-config"}})
+    assert lr.get_model_spec("summarize").model == "level3-global-env-var"
+
+    # 4. drop that → model.default
+    monkeypatch.delenv("ANY2WIKI_MODEL")
+    assert lr.get_model_spec("summarize").model == "level4-base-config"
+
+    # 5. nothing configured → the built-in fallback
+    _set_config(monkeypatch, {})
+    assert lr.get_model_spec("summarize").model == lr._FALLBACK_MODEL
+
+
+@pytest.mark.unit
+def test_timeout_and_extra_body_do_not_inherit_from_base(monkeypatch):
+    """provider/base_url/api_key inherit from the `model:` block; timeout/extra_body don't.
+
+    CLAUDE.md claimed all five inherited. They don't, and the asymmetry is easy to
+    reintroduce, so it is pinned here.
+    """
+    import src.llm_roles as lr
+
+    _set_config(monkeypatch, {
+        "model": {
+            "default": "base-model",
+            "provider": "anthropic",
+            "base_url": "https://base",
+            "api_key": "base-key",
+            "timeout": 99,
+            "extra_body": {"from": "base"},
+        },
+        "auxiliary": {"summarize": {}},   # task sets nothing
+    })
+    spec = lr.get_model_spec("summarize")
+
+    # these three inherit
+    assert spec.provider == "anthropic"
+    assert spec.base_url == "https://base"
+    assert spec.api_key == "base-key"
+
+    # these two do not
+    assert spec.timeout is None, "timeout must not inherit from the model: block"
+    assert spec.extra_body == {}, "extra_body must not inherit from the model: block"

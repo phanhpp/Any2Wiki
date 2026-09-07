@@ -10,7 +10,7 @@ so no network calls are made during test runs.
 
 Run: 
     # use uv to get the correct python version
-    uv run pytest -v -s tests/test_fetch_traces.py::test_offload_when_large
+    uv run pytest -v -s tests/tools/test_fetch_traces.py::test_offload_when_large
     
     # run only tests with the expect_exception marker
     uv run pytest -m expect_exception
@@ -52,7 +52,7 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "runs.json"
 def runs() -> list[SimpleNamespace]:
     """Load raw runs from fixture as SimpleNamespace for dot-attribute access."""
     if not FIXTURE_PATH.exists():
-        pytest.skip(f"Fixture not found — run `python -m tests.save_fixtures` first ({FIXTURE_PATH})")
+        pytest.skip(f"Fixture not found — run `python -m tests.scripts.save_fixtures` first ({FIXTURE_PATH})")
     data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     return [SimpleNamespace(**r) for r in data]
 
@@ -281,13 +281,13 @@ async def test_run_trace_report_async_uses_langsmith_filters_and_metadata(
     monkeypatch.setattr("src.tools.observability_eval_tools.fetch_traces.AsyncClient", _FakeAsyncClient)
 
     report = await _run_trace_report_async(
-        project="paper2wiki-test",
+        project="any2wiki-test",
         days=3,
         limit=2,
         error=True,
     )
 
-    assert captured_kwargs["project_name"] == "paper2wiki-test"
+    assert captured_kwargs["project_name"] == "any2wiki-test"
     assert captured_kwargs["limit"] == 2
     assert captured_kwargs["error"] is True
     assert report.run_count == 2

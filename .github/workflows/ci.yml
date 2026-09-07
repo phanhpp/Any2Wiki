@@ -7,12 +7,18 @@ on:
       - 'src/**'
       - 'skills/**'
       - 'eval/**'
+      - 'tests/**'          # a test-only PR must still run the tests it changes
+      - 'pyproject.toml'    # a dependency bump changes what everything runs against
+      - 'uv.lock'
   push:
     branches: [main]
     paths:
     - 'src/**'
     - 'skills/**'
     - 'eval/**'
+    - 'tests/**'
+    - 'pyproject.toml'
+    - 'uv.lock'
     # Github doesn't allow both paths and paths-ignore 
   # schedule:
   #   - cron: "0 2 * * 1"   # weekly on Monday at 02:00 UTC — uncomment when ready
@@ -33,6 +39,13 @@ permissions:
   contents: read
   pull-requests: write   # needed so the eval gate can post a PR comment
 
+# One run per branch. Pushing three commits to a PR used to start three full runs and
+# leave the earlier two going; now the older ones are cancelled. Never cancel a run on
+# main — that one is the record of what actually shipped.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   unit-and-eval:
     name: Unit Tests & Eval Gate
@@ -49,7 +62,7 @@ jobs:
       - run: uv sync --frozen
 
       - name: Unit tests
-        run: uv run pytest -m "not integration and not slow and not langsmith" -q
+        run: uv run pytest -m "not integration and not slow" -q
 
       - name: Eval gate
         # Skip on weekly schedule, only works on PRs not direct push to main
@@ -100,7 +113,11 @@ jobs:
   detect-changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || github.event.inputs.dataset == '')
+    # Not on push: a merge to main would re-run the golden evals the PR already ran,
+    # and those cost real LLM calls (the cheap `Eval gate` step is already PR-only).
+    if: >
+      github.event_name != 'schedule' && github.event_name != 'push' &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.dataset == '')
     outputs:
       ingest: ${{ steps.filter.outputs.ingest_any_changed }}
       query:  ${{ steps.filter.outputs.query_any_changed }}
@@ -146,7 +163,7 @@ jobs:
       LANGSMITH_TRACING: "true"
       # Pin to fast mode — uses web_search/web_extract, no arXiv/Docling dependency.
       # At least one web provider key required; registry picks first available.
-      PAPER2WIKI_INGEST_MODE: fast
+      ANY2WIKI_INGEST_MODE: fast
       FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -159,6 +176,8 @@ jobs:
         run: uv run python eval/push_golden_datasets.py --dataset ingest
       - name: Run ingest eval
         timeout-minutes: 15
+        env:
+          WIKI_PATH: eval/fixtures/wiki
         run: uv run python eval/run_weekly_eval.py --dataset ingest --use-cached-all --filter-type already-ingested
 
   eval-query:
@@ -184,6 +203,8 @@ jobs:
         run: uv run python eval/push_golden_datasets.py --dataset query
       - name: Run query eval
         timeout-minutes: 8
+        env:
+          WIKI_PATH: eval/fixtures/wiki
         run: uv run python eval/run_weekly_eval.py --dataset query --use-cached-all
 
   eval-marp:
@@ -210,29 +231,26 @@ jobs:
         run: uv run python eval/push_golden_datasets.py --dataset marp
       - name: Run marp eval
         timeout-minutes: 8
+        env:
+          WIKI_PATH: eval/fixtures/wiki
         run: uv run python eval/run_weekly_eval.py --dataset marp --use-cached-all
 
   weekly:
-    name: Weekly (LangSmith regression)
+    name: Weekly (anomaly baselines)
     runs-on: ubuntu-latest
     permissions:
       contents: write   # commit refreshed memories/baselines.json back to main
     # Only runs on schedule — not on PRs or push to main.
-    # Does two things: (1) refresh memories/baselines.json (latency/token medians, committed),
-    # and (2) replay hard_error examples ALREADY in the LangSmith regression datasets.
-    # It does NOT populate those datasets — dataset creation
-    # (create_datasets_from_anomaly_report) is HITL-only via the trace-analysis skill. If no HITL
-    # run has populated them, the replay step is a no-op (nothing to replay).
+    # One job: refresh memories/baselines.json (rolling latency/token/step medians) from
+    # recent traces, and commit it, so local detect_anomalies_async compares against
+    # CI-fresh thresholds.
+    #
+    # There is deliberately no replay step here. A hard error becomes durable coverage by
+    # being promoted into eval/pr_gate_cases.json, which runs on EVERY PR — replaying the
+    # same examples weekly duplicated that. See eval/README.md.
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dataset == '')
     env:
       LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      LANGSMITH_TRACING: "true"
-      LANGSMITH_TEST_SUITE: "paper2wiki-regression"
-      LANGSMITH_EXPERIMENT: ${{ github.sha }}
-      LANGSMITH_TEST_CACHE: tests/cassettes
-      LANGSMITH_EXPERIMENT_METADATA: >
-        {"git_sha": "${{ github.sha }}", "branch": "${{ github.ref_name }}"}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -258,10 +276,3 @@ jobs:
             git push
           fi
 
-      - name: Anomaly regression (pytest-langsmith)
-        # run tests/test_anomaly_regression.py
-        # Replays hard_error examples from LangSmith datasets populated EARLIER by HITL
-        # (the trace-analysis skill), NOT by this workflow.
-        # Gates on: hard_error spans must no longer error after a fix is merged.
-        # Tracks (but does not gate on): latency_spike, token_blowout, step_count_spike.
-        run: uv run pytest -m "langsmith and not slow and not integration" -q
