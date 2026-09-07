@@ -61,11 +61,12 @@ memories/*
 !memories/baselines.json
 USER.md
 
-# Wiki — local/generated (wiki pages themselves are tracked)
-wiki/raw/assets/
-wiki/raw/papers/graphrag-query-focused-summarization.md
-wiki/.cache/
-wiki/graph/
+# Wiki — local/generated. Leading slash on every one: a bare `wiki/` also matches
+# eval/fixtures/wiki/, which is committed test data (same trap as /connectors/ below).
+/wiki/raw/assets/
+/wiki/raw/papers/graphrag-query-focused-summarization.md
+/wiki/.cache/
+/wiki/graph/
 
 # Observability dev artifacts
 src/tools/observability_eval_tools/trace_offloads/
@@ -98,4 +99,8 @@ gateway/prometheus/master_key
 
 # The wiki is a user artifact, not repo content. Personal mode defaults here today
 # and moves to ~/any2wiki/ once packaged; code mode writes into the target repo.
-wiki/
+# Root-anchored so eval/fixtures/wiki/ — the committed golden-eval fixture — survives.
+/wiki/
+
+# Trace offloads
+trace_offloads/
