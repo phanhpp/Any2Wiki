@@ -22,6 +22,7 @@ Functions:
 from __future__ import annotations
 
 import logging
+import warnings
 import os
 from enum import Enum
 
@@ -49,6 +50,17 @@ def setup_logging(debug: bool = False) -> None:
     if not debug:
         for noisy in ("httpx", "httpcore", "urllib3", "anthropic", "openai", "daytona"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        # `logging` and `warnings` are separate systems, so the level above does not
+        # touch these. firecrawl's pydantic models declare a field named `json`, which
+        # shadows `BaseModel.json`, and pydantic warns once per class at import time —
+        # printing two tracebacks in the middle of a summarisation the user asked for.
+        # It is third-party and not actionable here, so hide it unless --debug.
+        warnings.filterwarnings(
+            "ignore",
+            message=r'Field name "\w+" in "\w+" shadows an attribute in parent',
+            category=UserWarning,
+        )
 
 
 def apply_env(
