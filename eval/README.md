@@ -191,6 +191,81 @@ Two pauses are described in the skill, but only one is **enforced** by the infra
 
 
 
+## Evaluator catalog
+
+Which evaluators run on a case is **opt-in per case**: `metadata["evaluators"]` in the
+golden dataset JSON lists them by **function name**. Anything not listed is skipped and
+records `score=None` (N/A in LangSmith) rather than a failure — see `_gate()` in
+`run_weekly_eval.py`.
+
+> **A function name is not always the key you see.** `answer_quality` returns a *list*, so
+> it emits **two** keys — `answer_grounded` and `answer_correctness`. You gate on
+> `answer_quality`; LangSmith shows the two. Neither is missing.
+
+### Shared — every dataset that runs the agent
+
+| Key | Passes when |
+|---|---|
+| `no_crash` | the run completed without raising |
+| `trajectory_subsequence` | the expected calls appear **in order** in the actual trajectory (partial credit) |
+| `trajectory_no_forbidden` | no tool from `forbidden_tools` was used |
+
+Both trajectory keys come from the one `trajectory_subsequence` function. Three things to know:
+
+- Extra calls before, between or after the expected ones are fine.
+- **A step may be a list — any one of them matches.** Models take different valid routes, so
+  `[[{"name": "grep"}, {"name": "read_file", "args_contains": "wiki/index.md"}]]` accepts either.
+  Still one step, not two.
+- Which list is used comes from `ANY2WIKI_INGEST_MODE` > config > `fast`, falling back to `any`.
+
+### Ingest
+
+| Evaluator | Kind | Passes when |
+|---|---|---|
+| `min_page_count` | code | at least `metadata["min_wiki_pages"]` article pages written |
+| `has_wikilinks` | code | `wiki_content` contains `[[...]]` links |
+| `maintenance_files_updated` | code | **both** `graph.json` and `citations.json` written |
+| `wiki_faithfulness` | judge | ≥ ⅔ of `metadata["expected_concepts"]` covered in `wiki_content` |
+| `no_hallucination` | judge | output is grounded in the source, not fabricated |
+| `ingest_outcome_correct` | judge | outcome matches `metadata["judge_criteria"]["ingest_outcome_correct"]` — the escape hatch for case-specific behaviour fixed code checks can't express. Evidence: request, final response, `files_written`, trajectory |
+
+### Query
+
+| Evaluator | Kind | Passes when |
+|---|---|---|
+| `answer_grounded` | judge | the answer cites the wiki via a `[[...]]` wikilink |
+| `answer_correctness` | judge | ≥ ⅔ of `reference_outputs["expected_concepts"]` addressed |
+
+*(both emitted by the single `answer_quality` function)*
+
+### Marp
+
+| Evaluator | Kind | Passes when |
+|---|---|---|
+| `has_marp_frontmatter` | code | YAML frontmatter with `marp: true` |
+| `has_lead_slide` | code | `<!-- _class: lead -->` present |
+| `has_content_slides` | code | ≥ 3 `## ` section headings |
+| `css_embedded` | code | a `<style>` block is present |
+| `file_saved` | code | `slide_path` exists on disk |
+| `used_web_search` | code | `web_search`/`web_extract` called **before** `marp-slide-creator` |
+| `slide_quality` | judge | deck meets `metadata["judge_criteria"]["slide_quality"]` |
+
+### Hard gates
+
+`run_weekly_eval.py` fails an example when the **mean** of its `hard_gate_keys` scores
+drops below **0.5**. Everything else is reported, not enforced.
+
+| Dataset | Hard gate keys |
+|---|---|
+| ingest | `no_crash` |
+| query | `no_crash`, `trajectory_no_forbidden` *(emitted by `trajectory_subsequence`)* |
+| marp | `has_marp_frontmatter`, `file_saved` |
+
+`--no-gate` reports scores without failing — use it while calibrating judges, or when
+testing a provider rather than the wiki.
+
+---
+
 ## PR-gate case schema
 
 What a case in `eval/pr_gate_cases.json` looks like, for anyone adding one by hand.
@@ -296,11 +371,12 @@ rendered box on the PR page) via `$GITHUB_STEP_SUMMARY` — no need to open the 
 | ---------------------------------------- | ----- | --------------------------------------------------------------------------------------- |
 | `eval/pr_gate_cases.json`                | 1     | Deterministic tool test cases — regression + capability                                 |
 | `eval/fixtures/mock_anomaly_report.json` | 3     | Hand-built AnomalyReport for exercising step 4 without a real failure                   |
+| `eval/fixtures/wiki/`                    | 2     | Committed wiki the golden evals read (`WIKI_PATH` in CI) — see below                    |
 | `eval/results.json`                      | 1     | **Output** of `run_gate.py`, rewritten every run. Not committed by CI, never read back. |
 | `eval/run_gate.py`                       | 1     | Runs pr_gate_cases.json, writes results.json, exits 1 on regression drop                |
 | `eval/golden_datasets/ingest.json`       | 2     | 4 cases: 1 already-ingested, 1 full-ingest, 1 partial-ingest, 1 negative                |
 | `eval/golden_datasets/query.json`        | 2     | 3 cases: 2 positive, 1 negative                                                         |
-| `eval/golden_datasets/marp.json`         | 2     | 3 cases: all positive (tech/business/web-search)                                        |
+| `eval/golden_datasets/marp.json`         | 2     | 2 cases: both positive (pug deck, wiki-sourced deck)                                        |
 | `eval/push_golden_datasets.py`           | 2     | Syncs JSON → LangSmith (`--dataset {ingest,query,marp}`)                                |
 | `eval/golden_evaluators.py`              | 2     | Code evals + LLM judges for all 3 datasets                                              |
 | `eval/run_weekly_eval.py`                | 2     | Target fns + aevaluate wiring + gate logic                                              |
@@ -311,6 +387,44 @@ rendered box on the PR page) via `$GITHUB_STEP_SUMMARY` — no need to open the 
 ---
 
 
+
+## The fixture wiki (`eval/fixtures/wiki/`)
+
+`--use-cached-all` replays a recorded JSON for the cases that have one, but the guards are
+matched on message content, so **two cases still run the live agent in CI**:
+
+| job | live case | needs a wiki |
+|---|---|---|
+| `eval-ingest` | *"Ingest the Attention is All You Need paper"* (`already-ingested`) | yes — the whole point is recognising it is **already there** |
+| `eval-query` | *"What does the wiki say about Iphone 15?"* (`negative`) | yes — the agent greps or reads the wiki to establish it has nothing |
+| `eval-marp` | none — both cached | no |
+
+`wiki/` is a user artifact and no longer tracked, so `actions/checkout` gives CI nothing.
+`eval/fixtures/wiki/` is the committed snapshot those two cases read, wired in by
+`WIKI_PATH: eval/fixtures/wiki` on each eval step.
+
+**Why a fixture rather than re-tracking `wiki/`:** the evals used to grade against whatever
+state your personal wiki happened to be in, so a pass meant little and could change without
+a commit. A fixture makes the input versioned and identical everywhere.
+
+`.gitignore` needs the wiki patterns **root-anchored** (`/wiki/`, not `wiki/`) or this
+directory is silently ignored too — the same trap already documented for `/connectors/`.
+
+Refresh it from a known-good wiki with:
+
+```bash
+rm -rf eval/fixtures/wiki
+git archive main wiki/ | tar -x -C eval/fixtures
+uv run python -c "from src.tools import quick_wiki_integrity_check as c; print(c.invoke({'wiki_dir':'eval/fixtures/wiki'}))"
+```
+
+**Source it from `main`, never from your working tree.** A fixture is only worth having if
+it is reproducible; copying local files puts state in it that no commit can account for.
+`wiki/graph/` is gitignored and therefore *not* part of it — nothing the live CI cases read
+needs it (`ingest.json` mentions `graph.json` only in `files_written` for a **cached** case,
+and in judge criteria describing what the agent should say).
+
+---
 
 ## Which tools belong in the gate (design principle)
 
@@ -395,10 +509,14 @@ Keep adding deterministic cases to **regression**; only network/external behavio
 ## Gate thresholds (active after calibration)
 
 
-| Dataset | Threshold | Hard gate keys                             |
-| ------- | --------- | ------------------------------------------ |
-| ingest  | 80%       | `no_crash`, `index_updated`, `log_updated` |
-| query   | 75%       | `no_crash`, `query_is_read_only`           |
-| marp    | 67%       | `has_marp_frontmatter`, `file_saved`       |
+| Dataset | Pass-rate threshold | Hard gate keys |
+| --- | --- | --- |
+| ingest | 80% | `no_crash` |
+| query | 75% | `no_crash`, `trajectory_no_forbidden` |
+| marp | 67% | `has_marp_frontmatter`, `file_saved` |
+
+Verbatim from `run_weekly_eval.py:513-547`. Two layers: an **example** passes when the mean
+of its hard-gate-key scores is ≥ 0.5; the **run** passes when the overall pass rate meets the
+threshold. `--no-gate` skips only the second.
 
 
