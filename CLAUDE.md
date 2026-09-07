@@ -363,5 +363,9 @@ uv run --env-file .env python eval/run_weekly_baselines.py
   `--install-completion` is the documented way to turn completion on, but `app.py`'s
   `add_completion=False` removes that flag, so neither works. Flip it to `True`, or drop
   the completers.
+- **Golden eval across providers** — rerun `eval/run_weekly_eval.py --dataset query --no-gate`
+  for each model in the `MODELS.md` test matrix, to confirm the eval suite itself (especially
+  `trajectory_subsequence`, now that it allows alternatives) works for every provider rather
+  than only for Claude. Costs one live agent run per case per model.
 - Consolidation agent + cron
 - RL

@@ -74,18 +74,58 @@ ANY2WIKI_MODEL_JUDGE=openai:gpt-4o any2wiki config show   # one task
 
 
 
-### Trying a new provider
+### Which models can be the supervisor
 
-The two tasks marked **needs structured output** call `with_structured_output`, which the
-supervisor never uses. A provider can handle the supervisor perfectly and still fail those
-two, so a chat test does not cover them:
+`supervisor` is the only task that needs a strong model. It runs a loop: read a skill, list files, search, read the right pages, decide what is missing, write. That is 2–15 dependent tool calls, each one conditioned on the last, with skills, wiki pages and tool output all in context at once. The other five tasks are one short call each, so cheap models are the right choice there.
 
-```bash
-uv run --env-file .env python scripts/probe_roles.py openai:gpt-4o
+Pick the supervisor for multi-step tool routing and sound reasoning under a large context. Coding benchmarks are secondary; function-calling accuracy (BFCL) and long-context stability matter more.
+
+**Suitable supervisors**
+
+```yaml
+# Anthropic
+anthropic:claude-sonnet-5             # default pick; 1M ctx, $3/$15
+anthropic:claude-opus-5               # escalation; 1M ctx, $5/$25
+anthropic:claude-sonnet-4-6           # current; 1M ctx, $3/$15. Keep only for pinning
+anthropic:claude-opus-4-8             # $5/$25, SWE-bench Pro 69.2; same price as Opus 5
+anthropic:claude-opus-4-7             # $5/$25, BFCL v3 76.6% (2nd overall, June 2026)
+anthropic:claude-opus-4-6             # $5/$25, 1M ctx; older, still reliable tool loops
+anthropic:claude-sonnet-4-5-20250929  # 200k ctx, $3/$15, BFCL 73.2%. Fine if 200k is enough
+anthropic:claude-opus-4-5-20251101    # 200k ctx, $5/$25, BFCL 77.5% on one tracker
+
+# OpenAI 
+openai:gpt-6-astra                    # $10/$50; strong but 2x Opus price, cache read $1
+openai:gpt-5.5                        # $5/$30; SEAL SWE-bench Pro leader in June
+openai:gpt-5.4                        # $2.5/$15; cheapest OpenAI with 1M ctx
+
+# Google
+google_genai:gemini-3.1-pro-preview   # note the -preview suffix; the bare name does not resolve
+
+# Open weights via OpenRouter
+openrouter:qwen/qwen3.7-max           # BFCL-V4 leader 75.0%, $1.25/$3.75; RL base family
+openrouter:qwen/qwen3.5-397b-a17b     # BFCL-V4 72.9%, top open model before 3.7
+openrouter:qwen/qwen3-32b             # BFCL v3 75.7% at $0.08/$0.28; fits one GPU
+openrouter:z-ai/glm-4.5               # BFCL v3 76.7% (topped it in June), $0.60/$2.20
+openrouter:z-ai/glm-5.2               # 744B/40B active, GPQA 91.2
+openrouter:moonshotai/kimi-k3         # 2.8T/~50B, GPQA 93.5; reasoning over tool use
+openrouter:deepseek/deepseek-v4-pro   # $0.43/$0.87, SWE-bench 80.6; cheapest strong option
+openrouter:deepseek/deepseek-v3.2     # cheap; too weak for code, OK for routing only
+
 ```
 
-One small call per task, forcing all six onto the model you name — pinned tasks included,
-which `-m` alone would not do. Omit the model to check your current config.
+**Not suitable as supervisor** (use for the five single-call tasks instead)
+
+```yaml
+anthropic:claude-haiku-4-5-20251001   # 200k ctx, BFCL 68.7
+openrouter:deepseek/deepseek-v4-flash # 13B active; bulk inference and RL base
+openrouter:google/gemini-3.8-flash    # no agentic benchmarks yet
+openrouter:google/gemini-2.5-flash    # BFCL 56.2
+openrouter:moonshotai/kimi-k2.5       # BFCL 47.1
+openrouter:meta-llama/llama-4-maverick  # mid on both BFCL and SWE
+openrouter:meta-llama/llama-4-scout
+openrouter:mistralai/mistral-large-2512
+
+```
 
 ---
 
