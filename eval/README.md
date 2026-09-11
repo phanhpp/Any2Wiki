@@ -45,9 +45,12 @@
 │  TRACK 3 — Anomaly Detection Loop  (weekly CI + HITL only)                  │
 │                                                                             │
 │  eval/run_weekly_baselines.py                                               │
-│      │  run_trace_report_async()  ──► LangSmith (fetch last N days)        │
+│      │  run_trace_report_async()  ──► LangSmith (fetch last 60 days)       │
 │      │  compute_baselines_async() ──► memories/baselines.json              │
 │      │                               {by_name: {medians}, by_flow: {steps}}│
+│      │                          ──► drift report (medians that moved >25%) │
+│      │                              printed + $GITHUB_STEP_SUMMARY;        │
+│      │                              never fails the job                    │
 │      ▼                                                                      │
 │  [trace-analysis skill — HITL only, never automatic]                        │
 │      │  detect_anomalies_async(report, baselines.json)                      │
@@ -81,7 +84,7 @@ Regression tests measure performance consistency across application versions ove
 | --------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------ |
 | **Every PR / push**                     | `pytest -m unit` + `eval/run_gate.py` (Track 1)                                       | ✅ fully auto, no secrets |
 | **PR touching ingest/query/marp paths** | the matching golden eval (Track 2)                                                    | ✅ auto, path-conditional |
-| **Weekly schedule**                     | `run_weekly_baselines.py` — refresh `memories/baselines.json` only                    | ✅ auto                   |
+| **Weekly schedule**                     | `run_weekly_baselines.py` — refresh `memories/baselines.json` + report baseline drift | ✅ auto                   |
 | **On-demand: "Analyze my traces"**      | `trace-analysis` skill → detect anomalies → **create datasets + draft pr_gate cases** | ❌ **HITL**               |
 
 
@@ -148,6 +151,25 @@ what can and can't become a test:
 
 The skill states the precedence itself: **"anomaly signals are ground truth, cluster
 observations are qualitative context."**
+
+### Why baseline drift is checked separately
+
+Every quantitative signal is *relative to* the median, which leaves one thing structurally
+invisible: the median moving. A regression that arrives all at once trips the 3× check; one
+that arrives 20% a week never does, because each week's baseline absorbs it and re-centres
+"normal" on the degraded behaviour.
+
+So `compute_baselines_async` compares each refreshed median against the one it replaces and
+returns a `drift` list — anything past `DRIFT_THRESHOLD` (25%). `run_weekly_baselines.py`
+prints it and appends it to the CI job summary.
+
+Two deliberate limits:
+
+- **It never fails the build.** A median moves for legitimate reasons — a new model, longer
+  papers, a connector coming online. It is a prompt to look, not a verdict.
+- **It is skipped unless both weeks cleared `MINIMUM_SAMPLES`.** A median over three samples
+  swings past 25% on noise alone, so an ungated check would fire constantly and be ignored —
+  which is how a checker dies.
 
 | Finding | Kind | Fix | Durable test? |
 |---|---|---|---|

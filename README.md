@@ -279,6 +279,13 @@ Step 3 produces two streams, and conflating them is the usual confusion:
 hard error on a tool run is reproducible enough to block a merge — spikes aren't, and an
 llm-run error has no tool to re-call. Detail in [`eval/README.md`](eval/README.md).
 
+**Spikes are a signal for a human, not a test.** A latency spike is usually the provider
+having a bad minute and a token blowout is usually a longer paper — replaying either just
+re-measures the weather. They land in a LangSmith dataset, get reported, and you decide
+whether to dig in (asking the agent to investigate is a normal follow-up turn). The one
+thing that *is* automated for them is the weekly drift check above, which catches the
+regression a spike check structurally cannot see.
+
 ---
 
 ## Marp Slide Creation (Isolated Sandbox)
@@ -356,8 +363,10 @@ Track 2 — Golden Agent Eval (weekly, or path-conditional on PR)
   run_weekly_eval.py        Runs the agent end-to-end with appropriate-scoped HITL auto-approval
   golden_evaluators.py      Code checks + LLM judges over LangSmith experiment results
 
-Track 3 — Anomaly Replay Loop (weekly + HITL only)
-  run_weekly_baselines.py   Fetches traces and refreshes latency/token/step medians
+Track 3 — Anomaly Baseline Loop (weekly + HITL only)
+  run_weekly_baselines.py   Fetches 60 days of traces, refreshes latency/token/step
+                            medians, and reports any median that moved >25% since
+                            last week (printed + CI job summary; never fails the build)
   trace-analysis skill      HITL-approved anomaly detection + dataset creation
   (promotion, not replay)   An approved hard_error becomes a pr_gate_cases.json entry,
                             which then runs on every PR — that is what locks the fix in
@@ -367,7 +376,9 @@ Track 3 — Anomaly Replay Loop (weekly + HITL only)
 
 **Track 2: golden agent evals** — end-to-end agent runs over curated ingest, query, and slide-generation scenarios. Code checks validate trajectories and required artifacts, while LLM judges score groundedness, faithfulness, and task-specific quality.
 
-**Track 3: anomaly loop** — weekly CI fetches recent LangSmith traces to refresh the anomaly baselines. The `trace-analysis` skill (HITL) turns detected failures into LangSmith datasets and, for tool hard errors, candidate PR-gate cases. **Promotion is what makes a fix durable**: once a case is in `pr_gate_cases.json` it runs on every PR, so there is no separate weekly replay to maintain.
+**Track 3: anomaly loop** — weekly CI fetches 60 days of LangSmith traces to refresh the anomaly baselines. The `trace-analysis` skill (HITL) turns detected failures into LangSmith datasets and, for tool hard errors, candidate PR-gate cases. **Promotion is what makes a fix durable**: once a case is in `pr_gate_cases.json` it runs on every PR, so there is no separate weekly replay to maintain.
+
+The same job also reports **baseline drift**. Anomalies are detected *relative to* the median, which means the median itself moving is invisible to them: if every run gets slowly slower, the baseline rises with it and the 3× spike check goes quiet — the regression is absorbed into "normal". So each refreshed median is compared against the one it replaces, and anything that moved more than 25% is printed to the job summary. It never fails the build; a moved median is a question for a human, not a broken test. The comparison is skipped when either week has fewer than `MINIMUM_SAMPLES` traces, since a median over three samples swings that far on noise alone.
 
 **Closed feedback loop** — the trace-analysis skill surfaces failures across the full stack (tool hard errors, latency spikes, token blowouts, step-count anomalies, HITL rejections). For hard errors it auto-generates candidate eval/pr_gate_cases.json entries with inferred assertions and waits for HITL approval before committing. The fix and its regression case land in the same PR, permanently hardening the gate against that failure recurring.
 

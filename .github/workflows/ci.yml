@@ -242,8 +242,10 @@ jobs:
       contents: write   # commit refreshed memories/baselines.json back to main
     # Only runs on schedule — not on PRs or push to main.
     # One job: refresh memories/baselines.json (rolling latency/token/step medians) from
-    # recent traces, and commit it, so local detect_anomalies_async compares against
-    # CI-fresh thresholds.
+    # the last 60 days of traces, and commit it, so local detect_anomalies_async compares
+    # against CI-fresh thresholds. It also reports any median that moved >25% since last
+    # week to the job summary — spike detection is relative to the median, so it cannot
+    # see the median itself drifting. Reported only; it never fails this job.
     #
     # There is deliberately no replay step here. A hard error becomes durable coverage by
     # being promoted into eval/pr_gate_cases.json, which runs on EVERY PR — replaying the
@@ -260,8 +262,9 @@ jobs:
       - run: uv sync --frozen
 
       - name: Update anomaly baselines
-        # Fetches recent traces and merges rolling medians into memories/baselines.json.
+        # Fetches 60 days of traces and merges rolling medians into memories/baselines.json.
         # Local detect_anomalies_async reads this file — git pull before trace analysis.
+        # Prints baseline drift and appends it to $GITHUB_STEP_SUMMARY.
         run: uv run python eval/run_weekly_baselines.py
 
       - name: Commit refreshed baselines

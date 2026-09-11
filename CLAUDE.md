@@ -295,7 +295,14 @@ Evaluator gating: each golden dataset example lists the evaluators it opts into 
 ### Tier 3 — Weekly CI (scheduled)
 
 Weekly job (`ci.yml` `weekly`) does **one** thing:
-- `eval/run_weekly_baselines.py` — fetches traces, `compute_baselines_async` merges medians into `memories/baselines.json`, CI commits and pushes to `main`
+- `eval/run_weekly_baselines.py` — fetches 60 days of traces, `compute_baselines_async` merges medians into `memories/baselines.json`, CI commits and pushes to `main`
+
+It also **reports baseline drift** (not a gate). Anomalies are measured *relative to* the
+median, so the median itself climbing is invisible to them — a regression that lands 20% a
+week is absorbed into the new normal and the 3× spike check never fires. So each refreshed
+median is compared against the one it replaces and anything past `DRIFT_THRESHOLD` (25%)
+goes to the job summary. Skipped unless both weeks cleared `MINIMUM_SAMPLES`: a median over
+three samples moves that far on noise, and a checker that cries wolf gets ignored.
 
 There is deliberately **no weekly replay**. A `pytest -m langsmith` job used to replay `hard_error` examples from the anomaly datasets; it was removed as redundant, because a hard error becomes durable coverage by being *promoted into* `eval/pr_gate_cases.json`, which then runs on **every** PR — strictly more often. The only signal lost is the `recovery_quality` LLM judge, which a deterministic gate can't express.
 
