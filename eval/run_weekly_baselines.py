@@ -10,8 +10,17 @@ They run via the trace-analysis skill, where a human reviews the anomaly report
 before any dataset write happens. Pushing datasets automatically risks committing
 infrastructure noise (chain-level OOM / network timeouts) as regression examples.
 
-The weekly CI gate is pytest -m langsmith — it replays existing hard_error examples
-from LangSmith datasets that were already human-reviewed and approved.
+There is no weekly replay job. A hard error becomes durable coverage by being
+promoted into eval/pr_gate_cases.json, which runs on every PR — strictly more often
+than a weekly replay would. See eval/README.md.
+
+Baseline drift is reported, not gated. detect_anomalies_async only fires when a run
+exceeds 3x the median, so a slow, steady regression raises the median along with it
+and the spike check goes quiet — the regression gets absorbed into "normal". To catch
+that, compute_baselines_async compares each refreshed median against the one it
+replaces and returns anything that moved more than DRIFT_THRESHOLD. This script prints
+those lines and, in CI, appends them to $GITHUB_STEP_SUMMARY. It never fails the job:
+a moved median is a question for a human, not a broken build.
 
 Run:
     uv run --env-file .env python eval/run_weekly_baselines.py
@@ -22,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -29,7 +39,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.tools.observability_eval_tools.fetch_traces import run_trace_report_async
-from src.tools.observability_eval_tools.anomaly_detection import compute_baselines_async
+from src.tools.observability_eval_tools.anomaly_detection import (
+    DRIFT_THRESHOLD,
+    compute_baselines_async,
+)
 
 # Use .coroutine to call the underlying async function directly —
 # bypasses LangChain tool validation overhead, appropriate for a script.
@@ -60,14 +73,55 @@ async def run(project: str, days: int, limit: int) -> int:
     n_flow = len(baseline_result.get("by_flow", {}))
     print(f"[weekly] Baselines updated: {n_name} run-name entries, {n_flow} flow entries")
 
+    # -- 3. Report drift -------------------------------------------------------
+    # Never changes the exit code. See the module docstring: a median that moved is
+    # a question for a human, not a failed build.
+    _report_drift(baseline_result.get("drift", []))
+
     return 0
+
+
+def _format_drift(drift: list[dict]) -> list[str]:
+    """One line per moved median, e.g. ``wiki-ingestion  median_steps  2 -> 9 (+350%)``."""
+    lines = []
+    for d in sorted(drift, key=lambda d: abs(d["change"]), reverse=True):
+        before, after, pct = d["before"], d["after"], d["change"] * 100
+        lines.append(f"{d['key']}  {d['metric']}  {before:g} -> {after:g} ({pct:+.0f}%)")
+    return lines
+
+
+def _report_drift(drift: list[dict]) -> None:
+    """Print moved medians, and append them to the CI job summary when running in CI."""
+    if not drift:
+        print("[weekly] No baseline drift over threshold.")
+        return
+
+    lines = _format_drift(drift)
+    print(f"[weekly] {len(lines)} baseline(s) moved >{DRIFT_THRESHOLD:.0%} since last refresh:")
+    for line in lines:
+        print(f"[weekly]   {line}")
+
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    body = "\n".join(f"- `{line}`" for line in lines)
+    with open(summary, "a", encoding="utf-8") as f:
+        f.write(
+            f"\n### Baseline drift (>{DRIFT_THRESHOLD:.0%})\n\n"
+            f"{body}\n\n"
+            "A median moving this much means the spike check is now measuring against a "
+            "different normal. Worth a look; not a build failure.\n"
+        )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", default="paper2wiki", help="LangSmith project name")
-    p.add_argument("--days",    type=int, default=30,  help="Lookback window in days")
-    p.add_argument("--limit",   type=int, default=100, help="Max traces to fetch")
+    # 60 days / 500 traces: a median is only as good as its sample count, and the
+    # previous 30/100 left per-flow buckets with 3 samples — small enough that the
+    # median moved on noise and normal runs tripped the 3x spike check.
+    p.add_argument("--days",    type=int, default=60,  help="Lookback window in days")
+    p.add_argument("--limit",   type=int, default=500, help="Max traces to fetch")
     return p.parse_args()
 
 

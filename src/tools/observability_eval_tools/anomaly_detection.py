@@ -49,6 +49,10 @@ from src.tools.observability_eval_tools.fetch_traces import TraceReport
 
 MINIMUM_SAMPLES = 3
 _SPIKE_MULTIPLIER = 3
+# Week-over-week move in a median that is worth a human's attention. Only compared
+# when BOTH the old and new entry cleared MINIMUM_SAMPLES — a median over 3 samples
+# swings more than 25% on noise alone, so an ungated check would be pure chatter.
+DRIFT_THRESHOLD = 0.25
 _LLM_RUN_TYPES = {"llm"}
 # LangGraph/LangChain internals, not single operations: their latency spans the whole
 # graph. "ChatOpenAI" covers every OpenAI-compatible endpoint too — OpenRouter,
@@ -186,6 +190,38 @@ def _is_eval_run(run: dict) -> bool:
 # compute_baselines_async  (scheduled maintenance tool)
 # ---------------------------------------------------------------------------
 
+def _drift(old_entry: dict | None, new_entry: dict, keys: tuple[str, ...]) -> list[dict]:
+    """Report medians that moved more than DRIFT_THRESHOLD since the last refresh.
+
+    The spike check in ``detect_anomalies_async`` is relative to the median, so it
+    cannot see the median itself moving: if every run gets 20% slower each week, the
+    baseline follows and nothing ever exceeds 3x. Drift is that blind spot.
+
+    Skipped unless both entries have >= MINIMUM_SAMPLES, and unless the old value is
+    a non-zero number — a baseline that was None or 0 has no meaningful ratio.
+    """
+    if not old_entry:
+        return []
+    if old_entry.get("sample_count", 0) < MINIMUM_SAMPLES:
+        return []
+    if new_entry.get("sample_count", 0) < MINIMUM_SAMPLES:
+        return []
+
+    moved: list[dict] = []
+    for key in keys:
+        before, after = old_entry.get(key), new_entry.get(key)
+        if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
+            continue
+        if not before:
+            continue
+        change = (after - before) / before
+        if abs(change) > DRIFT_THRESHOLD:
+            moved.append({
+                "metric": key, "before": before, "after": after, "change": change,
+            })
+    return moved
+
+
 @tool
 async def compute_baselines_async(report: TraceReport) -> dict:
     """Compute per-name and per-flow baselines from a TraceReport and persist them.
@@ -193,6 +229,11 @@ async def compute_baselines_async(report: TraceReport) -> dict:
     Intended to run on a schedule (weekly) so baselines reflect a rolling
     window of real traffic. Merges into BASELINES_PATH — only entries with
     >= MINIMUM_SAMPLES this window are updated; absent entries are preserved.
+
+    Also returns ``drift``: medians that moved more than DRIFT_THRESHOLD since the
+    previous refresh. The spike check is relative to the median, so it cannot see the
+    median itself climbing — a steady regression is absorbed into the new normal and
+    goes quiet. Reported for a human to judge, never gated. Not written to disk.
 
     Baselines computed:
     - by_name: median latency + median tokens per run name (llm runs only for tokens)
@@ -208,7 +249,8 @@ async def compute_baselines_async(report: TraceReport) -> dict:
         report: From ``run_trace_report_async()``.
 
     Returns:
-        The baselines dict that was written to disk.
+        ``{"by_name": ..., "by_flow": ..., "drift": [...]}``. The first two are what
+        was written to disk; ``drift`` is report-only and is not persisted.
     """
     traces = _load_traces(report)
     runs = _parse_runs(traces)
@@ -273,13 +315,28 @@ async def compute_baselines_async(report: TraceReport) -> dict:
     # (>= MINIMUM_SAMPLES this window). Entries absent from this run are left
     # untouched so a quiet week doesn't wipe out hard-won baselines.
     existing = _load_baselines()
+
+    # Compare each refreshed median against the one it replaces, before the old
+    # values are gone. This is the only point where both are in hand.
+    drift: list[dict] = []
+    for name, entry in by_name.items():
+        for moved in _drift(existing.get("by_name", {}).get(name), entry,
+                            ("median_latency", "median_tokens")):
+            drift.append({"scope": "by_name", "key": name, **moved})
+    for flow, entry in by_flow.items():
+        for moved in _drift(existing.get("by_flow", {}).get(flow), entry,
+                            ("median_steps",)):
+            drift.append({"scope": "by_flow", "key": flow, **moved})
+
     merged = {
         "by_name": {**existing.get("by_name", {}), **by_name},
         "by_flow": {**existing.get("by_flow", {}), **by_flow},
     }
     BASELINES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # `drift` is deliberately not persisted: baselines.json is the thresholds file,
+    # and a diff against the previous week is not a threshold.
     BASELINES_PATH.write_text(json.dumps(merged, indent=2))
-    return merged
+    return {**merged, "drift": drift}
 
 
 # ---------------------------------------------------------------------------
